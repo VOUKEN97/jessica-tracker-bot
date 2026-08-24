@@ -33,11 +33,16 @@ bot.start((ctx) => {
 bot.action('action_tambah', async (ctx) => {
     ctx.answerCbQuery();
     const chatId = ctx.chat.id || ctx.from.id;
-    await db.query(
-        `INSERT INTO user_states (user_id, step) VALUES ($1, 'LOCATION') ON CONFLICT (user_id) DO UPDATE SET step = 'LOCATION', location = NULL, date = NULL, time = NULL, fee = NULL, notes = NULL`,
-        [chatId]
-    );
-    ctx.reply("📍 *Di mana lokasi jaganya?*\nContoh: Klinik Sehat", { parse_mode: 'Markdown' });
+    try {
+        await db.query(
+            `INSERT INTO user_states (user_id, step) VALUES ($1, 'LOCATION') ON CONFLICT (user_id) DO UPDATE SET step = 'LOCATION', location = NULL, date = NULL, time = NULL, fee = NULL, notes = NULL`,
+            [chatId]
+        );
+        ctx.reply("📍 *Di mana lokasi jaganya?*\nContoh: Klinik Sehat", { parse_mode: 'Markdown' });
+    } catch (err) {
+        console.error(err);
+        ctx.reply("Terjadi kesalahan. Pastikan database terhubung.");
+    }
 });
 
 bot.action('action_hariini', (ctx) => {
