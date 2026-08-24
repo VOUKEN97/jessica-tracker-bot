@@ -22,7 +22,17 @@ pool.query(`
       end_time TEXT,
       notes TEXT,
       fee INTEGER DEFAULT 0
-  )
+  );
+  
+  CREATE TABLE IF NOT EXISTS user_states (
+      user_id BIGINT PRIMARY KEY,
+      step TEXT,
+      location TEXT,
+      date TEXT,
+      time TEXT,
+      fee INTEGER,
+      notes TEXT
+  );
 `).catch(err => console.error("DB Init Error:", err));
 
 module.exports = pool;

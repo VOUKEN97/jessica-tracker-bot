@@ -1,7 +1,6 @@
 require('dotenv').config();
 const { Telegraf, Markup } = require('telegraf');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
-const cron = require('node-cron');
 const db = require('./database');
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
@@ -9,14 +8,10 @@ const geminiApiKey = process.env.GEMINI_API_KEY;
 
 if (!token) {
     console.error("Error: TELEGRAM_BOT_TOKEN is missing.");
-    process.exit(1);
 }
 
 const bot = new Telegraf(token);
 const genAI = geminiApiKey ? new GoogleGenerativeAI(geminiApiKey) : null;
-
-// State management
-const userStates = {};
 
 // Helper: Main Menu Keyboard
 const mainMenu = Markup.inlineKeyboard([
@@ -35,10 +30,13 @@ bot.start((ctx) => {
 });
 
 // Callback Handlers
-bot.action('action_tambah', (ctx) => {
+bot.action('action_tambah', async (ctx) => {
     ctx.answerCbQuery();
-    const chatId = ctx.chat.id;
-    userStates[chatId] = { step: 'LOCATION' };
+    const chatId = ctx.chat.id || ctx.from.id;
+    await db.query(
+        `INSERT INTO user_states (user_id, step) VALUES ($1, 'LOCATION') ON CONFLICT (user_id) DO UPDATE SET step = 'LOCATION', location = NULL, date = NULL, time = NULL, fee = NULL, notes = NULL`,
+        [chatId]
+    );
     ctx.reply("📍 *Di mana lokasi jaganya?*\nContoh: Klinik Sehat", { parse_mode: 'Markdown' });
 });
 
@@ -99,7 +97,7 @@ bot.action(/hapus_(.+)/, async (ctx) => {
 
 // Text input handler (State Machine & AI)
 bot.on('text', async (ctx) => {
-    const chatId = ctx.chat.id;
+    const chatId = ctx.chat.id || ctx.from.id;
     const text = ctx.message.text;
 
     if (text.startsWith('/')) {
@@ -107,46 +105,41 @@ bot.on('text', async (ctx) => {
         return ctx.reply("Gunakan tombol menu atau ketik jadwal secara langsung.", mainMenu);
     }
 
-    const state = userStates[chatId];
-    
-    if (state && state.step) {
-        // Manual Entry Flow
-        if (state.step === 'LOCATION') {
-            state.location = text;
-            state.step = 'DATE';
-            return ctx.reply(`Sip, Klinik/Tempat: ${text}.\n📅 *Tanggal berapa?*\nFormat: YYYY-MM-DD (contoh: 2026-08-25)`, {parse_mode: 'Markdown'});
-        } else if (state.step === 'DATE') {
-            state.date = text;
-            state.step = 'TIME';
-            return ctx.reply(`Tanggal: ${text}.\n⏰ *Jam berapa shift-nya?*\nContoh: 08:00 - 14:00`, {parse_mode: 'Markdown'});
-        } else if (state.step === 'TIME') {
-            state.time = text;
-            state.step = 'FEE';
-            return ctx.reply(`Waktu: ${text}.\n💰 *Berapa estimasi fee-nya?*\n(Tulis angka saja, misal: 500000, atau 0 kalau tidak ada)`, {parse_mode: 'Markdown'});
-        } else if (state.step === 'FEE') {
-            state.fee = parseInt(text.replace(/[^0-9]/g, '')) || 0;
-            state.step = 'NOTES';
-            return ctx.reply(`Fee: Rp ${state.fee.toLocaleString('id-ID')}.\n📝 *Ada catatan khusus/yang harus diingat?*\n(Ketik '-' kalau tidak ada)`, {parse_mode: 'Markdown'});
-        } else if (state.step === 'NOTES') {
-            state.notes = text;
-            
-            const parts = state.time.split('-');
-            const start_time = parts[0] ? parts[0].trim() : state.time;
-            const end_time = parts[1] ? parts[1].trim() : '';
-            
-            try {
+    try {
+        const stateRes = await db.query(`SELECT * FROM user_states WHERE user_id = $1`, [chatId]);
+        const state = stateRes.rows[0];
+        
+        if (state && state.step) {
+            if (state.step === 'LOCATION') {
+                await db.query(`UPDATE user_states SET step = 'DATE', location = $1 WHERE user_id = $2`, [text, chatId]);
+                return ctx.reply(`Sip, Klinik/Tempat: ${text}.\n📅 *Tanggal berapa?*\nFormat: YYYY-MM-DD (contoh: 2026-08-25)`, {parse_mode: 'Markdown'});
+            } else if (state.step === 'DATE') {
+                await db.query(`UPDATE user_states SET step = 'TIME', date = $1 WHERE user_id = $2`, [text, chatId]);
+                return ctx.reply(`Tanggal: ${text}.\n⏰ *Jam berapa shift-nya?*\nContoh: 08:00 - 14:00`, {parse_mode: 'Markdown'});
+            } else if (state.step === 'TIME') {
+                await db.query(`UPDATE user_states SET step = 'FEE', time = $1 WHERE user_id = $2`, [text, chatId]);
+                return ctx.reply(`Waktu: ${text}.\n💰 *Berapa estimasi fee-nya?*\n(Tulis angka saja, misal: 500000, atau 0 kalau tidak ada)`, {parse_mode: 'Markdown'});
+            } else if (state.step === 'FEE') {
+                const fee = parseInt(text.replace(/[^0-9]/g, '')) || 0;
+                await db.query(`UPDATE user_states SET step = 'NOTES', fee = $1 WHERE user_id = $2`, [fee, chatId]);
+                return ctx.reply(`Fee: Rp ${fee.toLocaleString('id-ID')}.\n📝 *Ada catatan khusus/yang harus diingat?*\n(Ketik '-' kalau tidak ada)`, {parse_mode: 'Markdown'});
+            } else if (state.step === 'NOTES') {
+                const notes = text;
+                const parts = state.time.split('-');
+                const start_time = parts[0] ? parts[0].trim() : state.time;
+                const end_time = parts[1] ? parts[1].trim() : '';
+                
                 await db.query(
                     `INSERT INTO shifts (user_id, location, date, start_time, end_time, notes, fee) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-                    [chatId, state.location, state.date, start_time, end_time, state.notes, state.fee]
+                    [chatId, state.location, state.date, start_time, end_time, notes, state.fee]
                 );
-                ctx.reply(`✅ *Jadwal berhasil ditambahkan!*\n\n📍 ${state.location}\n📅 ${state.date}\n⏰ ${state.time}\n💰 Rp ${state.fee.toLocaleString('id-ID')}\n📝 ${state.notes}`, {parse_mode: 'Markdown', ...mainMenu});
-            } catch (err) {
-                console.error(err);
-                ctx.reply("Waduh, gagal menyimpan jadwal. Coba lagi ya.", mainMenu);
+                await db.query(`DELETE FROM user_states WHERE user_id = $1`, [chatId]);
+                return ctx.reply(`✅ *Jadwal berhasil ditambahkan!*\n\n📍 ${state.location}\n📅 ${state.date}\n⏰ ${state.time}\n💰 Rp ${state.fee.toLocaleString('id-ID')}\n📝 ${notes}`, {parse_mode: 'Markdown', ...mainMenu});
             }
-            delete userStates[chatId];
-            return;
         }
+    } catch (err) {
+        console.error(err);
+        return ctx.reply("Terjadi kesalahan sistem, coba lagi.", mainMenu);
     }
 
     // AI Flow
@@ -235,24 +228,4 @@ async function handleLaporan(ctx) {
     }
 }
 
-// Cron job to run daily at 6 AM
-cron.schedule('0 6 * * *', async () => {
-    const now = new Date();
-    const today = new Date(now.getTime() - (now.getTimezoneOffset() * 60000)).toISOString().split('T')[0];
-    
-    try {
-        const res = await db.query(`SELECT * FROM shifts WHERE date = $1`, [today]);
-        const rows = res.rows;
-        
-        rows.forEach(row => {
-            const message = `🔔 *Reminder Pagi!*\n\nHari ini ada jadwal jaga di *${row.location}*.\n⏰ Waktu: ${row.start_time} - ${row.end_time}\n📝 Jangan lupa: ${row.notes}\n\nSemangat Dok! 💪`;
-            bot.telegram.sendMessage(row.user_id, message, { parse_mode: "Markdown" });
-        });
-    } catch (err) {
-        console.error("Cron Error", err);
-    }
-});
-
-bot.launch().then(() => console.log("Bot V2 (PostgreSQL) is running..."));
-process.once('SIGINT', () => bot.stop('SIGINT'));
-process.once('SIGTERM', () => bot.stop('SIGTERM'));
+module.exports = bot;
